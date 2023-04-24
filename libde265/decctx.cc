@@ -124,9 +124,12 @@ thread_context::thread_context()
 
   //memset(this,0,sizeof(thread_context));
 
-  // some compilers/linkers don't align struct members correctly,
-  // adjust if necessary
-  int offset = (uintptr_t)_coeffBuf & 0x0f;
+  // There is a interesting issue here. When aligning _coeffBuf to 16 bytes offset with
+  // __attribute__((align(16))), the following statement is optimized away since the
+  // compiler assumes that the pointer would be 16-byte aligned. However, this is not the
+  // case when the structure has been dynamically allocated. In this case, the base can
+  // also be at 8 byte offsets (at least with MingW,32 bit).
+  int offset = ((uintptr_t)_coeffBuf) & 0xf;
 
   if (offset == 0) {
     coeffBuf = _coeffBuf;  // correctly aligned already
@@ -262,6 +265,7 @@ decoder_context::decoder_context()
   prevPicOrderCntLsb = 0;
   prevPicOrderCntMsb = 0;
   img = NULL;
+  previous_slice_header = nullptr;
 
   /*
   int PocLsbLt[MAX_NUM_REF_PICS];
@@ -558,6 +562,15 @@ de265_error decoder_context::read_sps_NAL(bitreader& reader)
   }
 
   sps[ new_sps->seq_parameter_set_id ] = new_sps;
+
+  // Remove the all PPS that referenced the old SPS because parameters may have changed and we do not want to
+  // get the SPS and PPS parameters (e.g. image size) out of sync.
+  
+  for (auto& p : pps) {
+    if (p && p->seq_parameter_set_id == new_sps->seq_parameter_set_id) {
+      p = nullptr;
+    }
+  }
 
   return DE265_OK;
 }
@@ -1413,8 +1426,9 @@ int decoder_context::generate_unavailable_reference_picture(const seq_parameter_
   std::shared_ptr<const seq_parameter_set> current_sps = this->sps[ (int)current_pps->seq_parameter_set_id ];
 
   int idx = dpb.new_image(current_sps, this, 0,0, false);
-  assert(idx>=0);
-  //printf("-> fill with unavailable POC %d\n",POC);
+  if (idx<0) {
+    return idx;
+  }
 
   de265_image* img = dpb.get_image(idx);
 
@@ -1438,7 +1452,7 @@ int decoder_context::generate_unavailable_reference_picture(const seq_parameter_
 
    This function will mark pictures in the DPB as 'unused' or 'used for long-term reference'
  */
-void decoder_context::process_reference_picture_set(slice_segment_header* hdr)
+de265_error decoder_context::process_reference_picture_set(slice_segment_header* hdr)
 {
   std::vector<int> removeReferencesList;
 
@@ -1565,7 +1579,7 @@ void decoder_context::process_reference_picture_set(slice_segment_header* hdr)
   // (old 8-99) / (new 8-106)
   // 1.
 
-  std::vector<bool> picInAnyList(dpb.size(), false);
+  std::vector<char> picInAnyList(dpb.size(), false);
 
 
   dpb.log_dpb_content();
@@ -1586,6 +1600,11 @@ void decoder_context::process_reference_picture_set(slice_segment_header* hdr)
       // We do not know the correct MSB
       int concealedPicture = generate_unavailable_reference_picture(current_sps.get(),
                                                                     PocLtCurr[i], true);
+      if (concealedPicture<0) {
+        return (de265_error)(-concealedPicture);
+      }
+      picInAnyList.resize(dpb.size(), false); // adjust size of array to hold new picture
+
       RefPicSetLtCurr[i] = k = concealedPicture;
       picInAnyList[concealedPicture]=true;
     }
@@ -1610,6 +1629,11 @@ void decoder_context::process_reference_picture_set(slice_segment_header* hdr)
     else {
       int concealedPicture = k = generate_unavailable_reference_picture(current_sps.get(),
                                                                         PocLtFoll[i], true);
+      if (concealedPicture<0) {
+        return (de265_error)(-concealedPicture);
+      }
+      picInAnyList.resize(dpb.size(), false); // adjust size of array to hold new picture
+
       RefPicSetLtFoll[i] = concealedPicture;
       picInAnyList[concealedPicture]=true;
     }
@@ -1639,8 +1663,13 @@ void decoder_context::process_reference_picture_set(slice_segment_header* hdr)
     else {
       int concealedPicture = generate_unavailable_reference_picture(current_sps.get(),
                                                                     PocStCurrBefore[i], false);
+      if (concealedPicture<0) {
+        return (de265_error)(-concealedPicture);
+      }
       RefPicSetStCurrBefore[i] = k = concealedPicture;
-      picInAnyList[concealedPicture]=true;
+
+      picInAnyList.resize(dpb.size(), false); // adjust size of array to hold new picture
+      picInAnyList[concealedPicture] = true;
 
       //printf("  concealed: %d\n", concealedPicture);
     }
@@ -1660,7 +1689,13 @@ void decoder_context::process_reference_picture_set(slice_segment_header* hdr)
     else {
       int concealedPicture = generate_unavailable_reference_picture(current_sps.get(),
                                                                     PocStCurrAfter[i], false);
+      if (concealedPicture<0) {
+        return (de265_error)(-concealedPicture);
+      }
       RefPicSetStCurrAfter[i] = k = concealedPicture;
+
+
+      picInAnyList.resize(dpb.size(), false); // adjust size of array to hold new picture
       picInAnyList[concealedPicture]=true;
 
       //printf("  concealed: %d\n", concealedPicture);
@@ -1682,7 +1717,7 @@ void decoder_context::process_reference_picture_set(slice_segment_header* hdr)
   // 4. any picture that is not marked for reference is put into the "UnusedForReference" state
 
   for (int i=0;i<dpb.size();i++)
-    if (!picInAnyList[i])        // no reference
+    if (i>=picInAnyList.size() || !picInAnyList[i])        // no reference
       {
         de265_image* dpbimg = dpb.get_image(i);
         if (dpbimg != img &&  // not the current picture
@@ -1700,6 +1735,8 @@ void decoder_context::process_reference_picture_set(slice_segment_header* hdr)
   hdr->RemoveReferencesList = removeReferencesList;
 
   //remove_images_from_dpb(hdr->RemoveReferencesList);
+
+  return DE265_OK;
 }
 
 
@@ -1967,9 +2004,10 @@ bool decoder_context::process_slice_segment_header(slice_segment_header* hdr,
   // get PPS and SPS for this slice
 
   int pps_id = hdr->slice_pic_parameter_set_id;
-  if (pps[pps_id]->pps_read==false) {
+  if (pps[pps_id]==nullptr || pps[pps_id]->pps_read==false) {
     logerror(LogHeaders, "PPS %d has not been read\n", pps_id);
-    assert(false); // TODO
+    img->decctx->add_warning(DE265_WARNING_NONEXISTING_PPS_REFERENCED, false);
+    return false;
   }
 
   current_pps = pps[pps_id];
@@ -1998,8 +2036,8 @@ bool decoder_context::process_slice_segment_header(slice_segment_header* hdr,
     int image_buffer_idx;
     bool isOutputImage = (!sps->sample_adaptive_offset_enabled_flag || param_disable_sao);
     image_buffer_idx = dpb.new_image(current_sps, this, pts, user_data, isOutputImage);
-    if (image_buffer_idx == -1) {
-      *err = DE265_ERROR_IMAGE_BUFFER_FULL;
+    if (image_buffer_idx < 0) {
+      *err = (de265_error)(-image_buffer_idx);
       return false;
     }
 
@@ -2051,7 +2089,10 @@ bool decoder_context::process_slice_segment_header(slice_segment_header* hdr,
       // mark picture so that it is not overwritten by unavailable reference frames
       img->PicState = UsedForShortTermReference;
 
-      process_reference_picture_set(hdr);
+      *err = process_reference_picture_set(hdr);
+      if (*err != DE265_OK) {
+        return false;
+      }
     }
 
     img->PicState = UsedForShortTermReference;

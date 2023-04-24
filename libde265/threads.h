@@ -27,12 +27,9 @@
 #include "config.h"
 #endif
 
-#ifdef HAVE_STDBOOL_H
-#include <stdbool.h>
-#endif
-
 #include <deque>
 #include <string>
+#include <atomic>
 
 #ifndef _WIN32
 #include <pthread.h>
@@ -42,17 +39,13 @@ typedef pthread_mutex_t  de265_mutex;
 typedef pthread_cond_t   de265_cond;
 
 #else // _WIN32
+#if !defined(NOMINMAX)
+#define NOMINMAX 1
+#endif
 #include <windows.h>
 #include "../extra/win32cond.h"
 #if _MSC_VER > 1310
 #include <intrin.h>
-#else
-extern "C"
-{
-   LONG  __cdecl _InterlockedExchangeAdd(long volatile *Addend, LONG Value);
-}
-#pragma intrinsic (_InterlockedExchangeAdd)
-#define InterlockedExchangeAdd _InterlockedExchangeAdd
 #endif
 
 typedef HANDLE              de265_thread;
@@ -76,30 +69,6 @@ void de265_cond_destroy(de265_cond* c);
 void de265_cond_broadcast(de265_cond* c, de265_mutex* m);
 void de265_cond_wait(de265_cond* c,de265_mutex* m);
 void de265_cond_signal(de265_cond* c);
-
-typedef volatile long de265_sync_int;
-
-inline int de265_sync_sub_and_fetch(de265_sync_int* cnt, int n)
-{
-#ifdef _WIN64
-  return _InterlockedAdd(cnt, -n);
-#elif _WIN32
-  return _InterlockedExchangeAdd(cnt, -n) - n;
-#else
-  return __sync_sub_and_fetch(cnt, n);
-#endif
-}
-
-inline int de265_sync_add_and_fetch(de265_sync_int* cnt, int n)
-{
-#ifdef _WIN64
-  return _InterlockedAdd(cnt, n);
-#elif _WIN32
-  return _InterlockedExchangeAdd(cnt, n) + n;
-#else
-  return __sync_add_and_fetch(cnt, n);
-#endif
-}
 
 
 class de265_progress_lock

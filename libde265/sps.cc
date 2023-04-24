@@ -37,8 +37,8 @@
 #define READ_VLC(variable, vlctype)  READ_VLC_OFFSET(variable,vlctype,0)
 
 
-static int SubWidthC_tab[]  = { -1,2,2,1 };
-static int SubHeightC_tab[] = { -1,2,1,1 };
+static int SubWidthC_tab[]  = { 1,2,2,1 };
+static int SubHeightC_tab[] = { 1,2,1,1 };
 
 
 // TODO if (!check_high(ctx, vlc, 15)) return false;
@@ -265,8 +265,18 @@ de265_error seq_parameter_set::read(error_queue* errqueue, bitreader* br)
 
   READ_VLC_OFFSET(bit_depth_luma,  uvlc, 8);
   READ_VLC_OFFSET(bit_depth_chroma,uvlc, 8);
+  if (bit_depth_luma > 16 ||
+      bit_depth_chroma > 16) {
+    errqueue->add_warning(DE265_WARNING_SPS_HEADER_INVALID, false);
+    return DE265_ERROR_CODED_PARAMETER_OUT_OF_RANGE;
+  }
 
   READ_VLC_OFFSET(log2_max_pic_order_cnt_lsb, uvlc, 4);
+  if (log2_max_pic_order_cnt_lsb<4 ||
+      log2_max_pic_order_cnt_lsb>16) {
+    errqueue->add_warning(DE265_WARNING_SPS_HEADER_INVALID, false);
+    return DE265_ERROR_CODED_PARAMETER_OUT_OF_RANGE;
+  }
   MaxPicOrderCntLsb = 1<<(log2_max_pic_order_cnt_lsb);
 
 
@@ -355,6 +365,16 @@ de265_error seq_parameter_set::read(error_queue* errqueue, bitreader* br)
     READ_VLC_OFFSET(log2_min_pcm_luma_coding_block_size, uvlc, 3);
     READ_VLC(log2_diff_max_min_pcm_luma_coding_block_size, uvlc);
     pcm_loop_filter_disable_flag = get_bits(br,1);
+
+    if (pcm_sample_bit_depth_luma > bit_depth_luma) {
+      errqueue->add_warning(DE265_WARNING_PCM_BITDEPTH_TOO_LARGE, false);
+      return DE265_ERROR_CODED_PARAMETER_OUT_OF_RANGE;
+    }
+
+    if (pcm_sample_bit_depth_chroma > bit_depth_chroma) {
+      errqueue->add_warning(DE265_WARNING_PCM_BITDEPTH_TOO_LARGE, false);
+      return DE265_ERROR_CODED_PARAMETER_OUT_OF_RANGE;
+    }
   }
   else {
     pcm_sample_bit_depth_luma = 0;
@@ -415,7 +435,10 @@ de265_error seq_parameter_set::read(error_queue* errqueue, bitreader* br)
 
   vui_parameters_present_flag = get_bits(br,1);
   if (vui_parameters_present_flag) {
-    vui.read(errqueue, br, this);
+    de265_error err = vui.read(errqueue, br, this);
+    if (err) {
+      return err;
+    }
   }
 
 
@@ -863,15 +886,13 @@ de265_error read_scaling_list(bitreader* br, const seq_parameter_set* sps,
   int dc_coeff[4][6];
 
   for (int sizeId=0;sizeId<4;sizeId++) {
-    int n = ((sizeId==3) ? 2 : 6);
+    //int n = ((sizeId==3) ? 2 : 6);
     uint8_t scaling_list[6][32*32];
 
-    for (int matrixId=0;matrixId<n;matrixId++) {
+    // Note: we use a different matrixId for the second matrix of size 3 (we use '3' instead of '1').
+    for (int matrixId=0 ; matrixId<6 ; matrixId += (sizeId==3 ? 3 : 1)) {
       uint8_t* curr_scaling_list = scaling_list[matrixId];
       int scaling_list_dc_coef;
-
-      int canonicalMatrixId = matrixId;
-      if (sizeId==3 && matrixId==1) { canonicalMatrixId=3; }
 
 
       //printf("----- matrix %d\n",matrixId);
@@ -879,8 +900,17 @@ de265_error read_scaling_list(bitreader* br, const seq_parameter_set* sps,
       char scaling_list_pred_mode_flag = get_bits(br,1);
       if (!scaling_list_pred_mode_flag) {
         int scaling_list_pred_matrix_id_delta = get_uvlc(br);
-        if (scaling_list_pred_matrix_id_delta == UVLC_ERROR ||
-            scaling_list_pred_matrix_id_delta > matrixId) {
+
+        if (scaling_list_pred_matrix_id_delta == UVLC_ERROR) {
+          return DE265_ERROR_CODED_PARAMETER_OUT_OF_RANGE;
+        }
+
+        if (sizeId == 3) {
+          // adapt to our changed matrixId for size 3
+          scaling_list_pred_matrix_id_delta *= 3;
+        }
+
+        if (scaling_list_pred_matrix_id_delta > matrixId) {
           return DE265_ERROR_CODED_PARAMETER_OUT_OF_RANGE;
         }
 
@@ -894,15 +924,14 @@ de265_error read_scaling_list(bitreader* br, const seq_parameter_set* sps,
             memcpy(curr_scaling_list, default_ScalingList_4x4, 16);
           }
           else {
-            if (canonicalMatrixId<3)
+            if (matrixId<3)
               { memcpy(curr_scaling_list, default_ScalingList_8x8_intra,64); }
             else
               { memcpy(curr_scaling_list, default_ScalingList_8x8_inter,64); }
           }
         }
         else {
-          // TODO: CHECK: for sizeID=3 and the second matrix, should we have delta=1 or delta=3 ?
-          if (sizeId==3) { assert(scaling_list_pred_matrix_id_delta==1); }
+          if (sizeId==3) { assert(scaling_list_pred_matrix_id_delta==3); }
 
           int mID = matrixId - scaling_list_pred_matrix_id_delta;
 
@@ -972,6 +1001,27 @@ de265_error read_scaling_list(bitreader* br, const seq_parameter_set* sps,
     }
   }
 
+
+  // --- fill 32x32 matrices for chroma
+
+  const position* scan = get_scan_order(3, 0 /* diag */);
+	
+  for (int matrixId=0;matrixId<6;matrixId++)
+    if (matrixId!=0 && matrixId!=3) {
+      for (int i=0;i<64;i++) {
+	int x = scan[i].x;
+	int y = scan[i].y;
+	int v = sclist->ScalingFactor_Size1[matrixId][y][x];
+
+	for (int dy=0;dy<4;dy++)
+	  for (int dx=0;dx<4;dx++) {
+	    sclist->ScalingFactor_Size3[matrixId][4*y+dy][4*x+dx] = v;
+	  }
+      }
+
+      sclist->ScalingFactor_Size3[matrixId][0][0] = sclist->ScalingFactor_Size1[matrixId][0][0];
+    }
+  
   return DE265_OK;
 }
 

@@ -25,10 +25,6 @@
 #include <config.h>
 #endif
 
-#ifdef HAVE_STDBOOL_H
-#include <stdbool.h>
-#endif
-
 #include "libde265/bitstream.h"
 #include "libde265/de265.h"
 #include "libde265/cabac.h"
@@ -147,7 +143,7 @@ public:
   uint8_t vps_max_layer_id;   // max value for nuh_layer_id in NALs
   int     vps_num_layer_sets; // [1;1024], currently always 1
 
-  std::vector<std::vector<bool> > layer_id_included_flag; // max size = [1024][64]
+  std::vector<std::vector<char> > layer_id_included_flag; // max size = [1024][64]
 
 
   // --- timing info ---

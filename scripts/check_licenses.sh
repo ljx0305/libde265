@@ -25,15 +25,37 @@ CHECK_RESULT=`/usr/bin/licensecheck --recursive --ignore 'nacl_sdk' .`
 
 # Files that are public domain or have other known-good license headers which licensecheck doesn't detect.
 KNOWN_GOOD_FILES=(
-    './extra/stdint.h',
     './extra/win32cond.c',
     './extra/win32cond.h',
     './libde265/md5.cc',
     './libde265/md5.h',
 )
 
+IGNORE_FILES=(
+    '.gitignore',
+    'appveyor.yml',
+    'build.bat',
+    'configure.ac',
+    'libde265.pc.in',
+    'libde265.png',
+    'valgrind.supp',
+    'AUTHORS',
+    'ChangeLog',
+    'CMakeLists.txt',
+    'COPYING',
+    'Makefile.am',
+    'Makefile.vc7',
+    'NEWS',
+    'README.md',
+)
+
 FOUND=
 while read -r line; do
+    if ( echo $line | grep -qE "/\.git/|/\.github/" ); then
+        # Skip files in ".git" / ".github" folders
+        continue
+    fi
+
     if ( echo $line | grep -q "GENERATED FILE" ); then
         # We don't care about generated files
         echo "OK: $line"
@@ -44,6 +66,9 @@ while read -r line; do
         FILENAME=`echo "$line" | awk '{split($0,a,":");print a[1]}'`
         if echo "${KNOWN_GOOD_FILES[@]}" | fgrep -q --word-regexp "${FILENAME}"; then
             echo "OK: $line (known-good)"
+        elif echo "${IGNORE_FILES[@]}" | fgrep -q --word-regexp "$(basename ${FILENAME})"; then
+            # Some files are not ignored / handled by licensecheck.
+            echo "OK: $line (ignore)"
         else
             echo "ERROR: $line" >& 2
             FOUND=1
